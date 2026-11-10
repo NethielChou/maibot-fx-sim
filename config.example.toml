@@ -1,0 +1,121 @@
+# 麦麦炒外汇 config.example.toml
+# 复制为 config.toml 后由宿主加载；仓库根目录不得提交 config.toml。
+# 说明：数值为 0.3.4 默认值（虚拟人民币计价 / 10 倍 / 1万单位 / 1,000 货币步长）。
+
+[plugin]
+enabled = true
+config_version = "0.3.4"
+
+[account]
+# 账户币种固定为虚拟人民币（元），由行情里的 USDCNY/USDJPY 两条真实汇率锚换算
+currency = "CNY"
+initial_balance = 100000.0
+leverage = 10
+unit_contracts = 10000
+min_units = 1000
+commission_per_10k = 0.0
+allow_hedging = false
+loss_cut_ratio = 50.0
+margin_call_ratio = 100.0
+liquidation_mode = "all"
+swap_enabled = true
+
+[market]
+source = "sina"
+pairs = []
+quote_poll_seconds = 15
+quote_timeout_seconds = 8
+stale_quote_seconds = 60
+quote_jitter_ratio = 0.15
+secondary_enabled = false
+weekend_valuation = true
+# 行情里顺带拉取 USDCNY（在岸人民币换算锚，不是可交易品种）
+usdcny_enabled = true
+# 行情卡显示「人民币参考汇率」栏（8 个参考对，只展示、不可交易）
+cny_reference_enabled = true
+
+[spread]
+max_multiplier = 5.0
+rollover_multiplier = 3.0
+monday_open_multiplier = 2.5
+news_core_multiplier = 3.0
+news_edge_multiplier = 2.0
+market_max_slip_pips = 3.0
+
+[orders]
+max_pending = 20
+default_tif = "GTC"
+allow_limit = true
+allow_stop = true
+allow_trailing = false
+allow_ifd = false
+quote_stale_fill_seconds = 5
+
+[risk]
+risk_per_trade_ratio = 0.02
+margin_per_order_ratio = 0.15
+max_positions = 6
+max_units_per_pair = 200000
+daily_trade_limit = 6
+daily_loss_limit_ratio = 0.05
+max_drawdown_ratio = 0.20
+forbid_add_to_loser = true
+loss_cut_cooldown_minutes = 10
+post_loss_cut_resume_ratio = 100.0
+
+[decision]
+auto_trade = false
+llm_enabled = true
+interval_minutes = 30
+decision_windows = ["08:00-24:00"]
+max_llm_calls_per_day = 30
+prompt_char_limit = 8000
+decision_max_tokens = 1200
+report_max_tokens = 300
+temperature = 0.7
+decision_task_name = "planner"
+report_task_name = "replyer"
+request_timeout_ms = 120000
+max_drift_pips = 3.0
+
+[influence]
+# 群聊上下文：决策前把最近群聊作为参考材料放进提示词（默认关闭）
+# 不评分、不设权重、不落盘，也不把聊天原文写进日志
+enabled = false
+# 读取哪个群的聊天记录；留空=使用 [notify] 的播报群名单
+group_ids = []
+limit = 20
+hours = 1.0
+timeout_seconds = 10
+
+[swap]
+rollover_time = "17:00"
+timezone = "America/New_York"
+triple_weekday = 2
+triple_enabled = true
+
+[notify]
+platform = "qq"
+group_ids = []
+private_enabled = false
+event_reports = true
+merge_messages = true
+merge_window_ms = 800
+
+[admin]
+users = []
+
+[calendar]
+# 经济指标事件窗：高影响事件公布前后禁止新开仓（默认关闭）
+enabled = false
+# auto=联网取真实财经日历（失败自动回退静态表）/ static=只用静态表、不联网
+source = "auto"
+refresh_minutes = 30
+blackout_minutes = 30
+block_high_impact_only = true
+announce_minutes = 60
+# 静态事件表：时间|币种|名称|影响（时间按北京时间）；留空=没有静态事件（不内置示例表）
+events = []
+
+[storage]
+history_limit = 200
