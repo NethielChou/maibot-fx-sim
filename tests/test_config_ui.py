@@ -98,7 +98,7 @@ def make_schema(extra_fields: dict[str, dict] | None = None) -> dict:
             ].update(fields)
     return {
         "plugin_id": "github.nethielchou.mai-fx-sim",
-        "plugin_info": {"name": "麦麦炒外汇", "version": "0.1.0"},
+        "plugin_info": {"name": "麦麦外汇战士", "version": "0.1.0"},
         "sections": sections,
         "layout": {"type": "grid"},
     }

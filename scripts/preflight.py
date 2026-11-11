@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_PLUGIN_VERSION = "0.3.4"
+EXPECTED_PLUGIN_VERSION = "0.4.0"
 REQUIRED = [
     "plugin.py", "_manifest.json", "config.py", "config_ui.py", "models.py", "pairs.py",
     "market_clock.py", "quotes.py", "execution_cost.py", "orders.py", "accounting.py",

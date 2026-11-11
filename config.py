@@ -1,4 +1,4 @@
-"""配置模型：麦麦炒外汇（Rev 1.2 口径：虚拟人民币计价 / 10 倍 / 1万单位 / 1,000 货币步长）。
+"""配置模型：麦麦外汇战士（Rev 1.2 口径：虚拟人民币计价 / 10 倍 / 1万单位 / 1,000 货币步长）。
 
 约定：
 - 所有字段必须有默认值（宿主 Runner 首次加载时以此生成 config.toml）。
@@ -8,7 +8,7 @@
 
 from maibot_sdk import Field, PluginConfigBase
 
-CONFIG_VERSION = "0.3.4"
+CONFIG_VERSION = "0.4.0"
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -214,9 +214,9 @@ class StorageConfig(PluginConfigBase):
 
 
 class MaiFxConfig(PluginConfigBase):
-    """麦麦炒外汇完整配置（宿主按此生成 config.toml）。"""
+    """麦麦外汇战士完整配置（宿主按此生成 config.toml）。"""
 
-    __ui_label__ = "麦麦炒外汇"
+    __ui_label__ = "麦麦外汇战士"
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     account: AccountConfig = Field(default_factory=AccountConfig)

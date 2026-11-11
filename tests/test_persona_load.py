@@ -143,7 +143,7 @@ class LoadPersonaTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, joined)
 
     def test_plugin_version_is_034(self) -> None:
-        self.assertEqual(_MODULE.PLUGIN_VERSION, "0.3.4")
+        self.assertEqual(_MODULE.PLUGIN_VERSION, "0.4.0")
 
 
 if __name__ == "__main__":

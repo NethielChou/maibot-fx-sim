@@ -973,7 +973,7 @@ def status(
     quotes = quotes or {}
     equity, margin, floating = _account_metrics(account, positions, quotes, pairs, rates, leverage)
     pending_count = len(list(pending or []))
-    lines = _title("📊 麦麦炒外汇 · 账户概览")
+    lines = _title("📊 麦麦外汇战士 · 账户概览")
     if rates is None:
         lines.extend(_block("⚠️ 汇率不可用：净值与维持率暂停估值", "（绝不用假汇率，暂不开新仓）"))
         lines.append("")

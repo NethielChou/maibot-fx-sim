@@ -1,10 +1,10 @@
-# 麦麦炒外汇 config.example.toml
+# 麦麦外汇战士 config.example.toml
 # 复制为 config.toml 后由宿主加载；仓库根目录不得提交 config.toml。
 # 说明：数值为 0.3.4 默认值（虚拟人民币计价 / 10 倍 / 1万单位 / 1,000 货币步长）。
 
 [plugin]
 enabled = true
-config_version = "0.3.4"
+config_version = "0.4.0"
 
 [account]
 # 账户币种固定为虚拟人民币（元），由行情里的 USDCNY/USDJPY 两条真实汇率锚换算

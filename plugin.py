@@ -1,4 +1,4 @@
-"""麦麦炒外汇 — 插件主入口（P0）。
+"""麦麦外汇战士 — 插件主入口（P0）。
 
 职责：
 - 生命周期 on_load / on_unload / on_config_update；
@@ -40,11 +40,11 @@ from .market_clock import now_utc
 from .quotes import QuoteSource
 from .scheduler import TradingEngine
 
-PLUGIN_VERSION = "0.3.4"
+PLUGIN_VERSION = "0.4.0"
 
 
 class MaiFxSimPlugin(MaiBotPlugin):
-    """麦麦炒外汇插件实例。"""
+    """麦麦外汇战士插件实例。"""
 
     config_model = MaiFxConfig
 
@@ -75,7 +75,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
             await self._start_services()
         engine = self._engine
         self.ctx.logger.info(
-            "麦麦炒外汇 %s 已加载（config_version=%s，账户=%s，自动交易=%s，品种=%d，宿主人设=%s，群聊上下文=%s，财经日历=%s/%s）",
+            "麦麦外汇战士 %s 已加载（config_version=%s，账户=%s，自动交易=%s，品种=%d，宿主人设=%s，群聊上下文=%s，财经日历=%s/%s）",
             PLUGIN_VERSION,
             CONFIG_VERSION,
             f"{int(self.config.account.initial_balance):,} 元 / {int(self.config.account.leverage)} 倍",
@@ -90,7 +90,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
     async def on_unload(self) -> None:
         async with self._setup_lock:
             await self._stop_services()
-        self.ctx.logger.info("麦麦炒外汇已卸载")
+        self.ctx.logger.info("麦麦外汇战士已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         del config_data
@@ -99,7 +99,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
         async with self._setup_lock:
             await self._stop_services()
             await self._start_services()
-        self.ctx.logger.info("麦麦炒外汇配置已更新（version=%s），引擎已重建", version)
+        self.ctx.logger.info("麦麦外汇战士配置已更新（version=%s），引擎已重建", version)
 
     # ---------- 服务装配 ----------
 
@@ -388,7 +388,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
 
     @Command(
         "外汇",
-        description="麦麦炒外汇模拟盘：状态/持仓/挂单/行情/保证金/隔夜/帮助；控制命令仅管理员",
+        description="麦麦外汇战士模拟盘：状态/持仓/挂单/行情/保证金/隔夜/帮助；控制命令仅管理员",
         pattern=r"^/(?:外汇|fx)(?:\s+.*)?$",
         timeout_ms=180000,
     )
