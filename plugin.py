@@ -21,7 +21,8 @@ import os
 import sys
 from typing import Any
 
-from maibot_sdk import Command, MaiBotPlugin
+from maibot_sdk import Command, HookHandler, MaiBotPlugin
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 # P0 兼容：部分模块使用绝对导入（from models import ...）。宿主按包加载时插件目录
 # 不在 sys.path，因此这里补一次（仅追加本插件目录，避免影响宿主其余模块）。
@@ -31,7 +32,7 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from . import decision, influence, report
+from . import decision, influence, maisaka_glue, report
 from .commands import CommandServices, handle as handle_command
 from .config import CONFIG_VERSION, MaiFxConfig
 from .config_ui import build_config_ui_schema
@@ -40,7 +41,7 @@ from .market_clock import now_utc
 from .quotes import QuoteSource
 from .scheduler import TradingEngine
 
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 
 
 class MaiFxSimPlugin(MaiBotPlugin):
@@ -66,6 +67,8 @@ class MaiFxSimPlugin(MaiBotPlugin):
         self._chat_streams: set[str] = set()
         # 宿主人设（on_load 时读一次；插件不定义人设，读不到就是空串）
         self._persona: str = ""
+        # 机器人称呼（宿主 bot.nickname；读不到时用「麦麦」）
+        self._bot_name: str = "麦麦"
 
     # ---------- 生命周期 ----------
 
@@ -128,6 +131,9 @@ class MaiFxSimPlugin(MaiBotPlugin):
         )
         # 宿主人设：读不到就空着（不阻塞加载，也不伪造性格）
         self._persona = await self._load_persona()
+        # 机器人称呼：每个麦麦可能叫不同名字（宿主 bot.nickname）
+        self._bot_name = await self._load_bot_name()
+        report.set_bot_name(self._bot_name)
         self._engine = TradingEngine(
             ctx=self.ctx,
             config=self.config,
@@ -135,6 +141,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
             ledger=self._ledger,
             log=lambda msg: self.ctx.logger.warning(msg),
             persona=self._persona,
+            bot_name=self._bot_name,
             chat_context_fetcher=self._fetch_chat_context,
         )
         await self._engine.start()
@@ -197,6 +204,28 @@ class MaiFxSimPlugin(MaiBotPlugin):
         if persona:
             self.ctx.logger.info("已读取宿主人设（%d 字）", len(persona))
         return persona
+
+    async def _load_bot_name(self) -> str:
+        """从宿主读取机器人昵称（``bot.nickname``）；读不到用默认「麦麦」。"""
+
+        try:
+            response = await self.ctx.call_capability(
+                "config.get",
+                key="bot.nickname",
+                default="",
+            )
+        except Exception as exc:  # noqa: BLE001 - 昵称缺失不影响交易
+            self.ctx.logger.warning("读取机器人昵称失败：%s", exc)
+            return "麦麦"
+        if isinstance(response, str):
+            name = response.strip()
+        elif isinstance(response, dict):
+            if response.get("success") is False:
+                return "麦麦"
+            name = str(response.get("value") or "").strip()
+        else:
+            name = ""
+        return name or "麦麦"
 
     # ---------- 聊天流 / 发送 ----------
 
@@ -365,6 +394,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
             self.config,
             budget,
             persona=self._persona,
+            bot_name=self._bot_name,
             chat_context_lines=chat_context_lines,
             calendar_lines=calendar_lines,
         )
@@ -385,6 +415,61 @@ class MaiFxSimPlugin(MaiBotPlugin):
         if bool(config.notify.private_enabled) and str(user_id or "").strip():
             return True
         return False
+
+    # ---------- 让麦麦知道插件存在（Planner 上下文注入） ----------
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="mai_fx_planner_fact",
+        description="把外汇插件存在的事实注入 Planner 上下文",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=6000,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def on_planner_before_request(self, **kwargs: Any) -> dict[str, Any] | None:
+        return self._inject_fact(kwargs)
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="mai_fx_replyer_fact",
+        description="把外汇插件存在的事实注入 replyer 请求",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=6000,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def on_replyer_before_request(self, **kwargs: Any) -> dict[str, Any] | None:
+        return self._inject_fact(kwargs)
+
+    def _inject_fact(self, kwargs: Any) -> dict[str, Any] | None:
+        """构造事实文本并注入；任何异常都静默降级（绝不影响聊天/交易）。"""
+
+        try:
+            config = self.config
+            engine = self._engine
+            block = maisaka_glue.build_fact_block(
+                bot_name=getattr(self, "_bot_name", "") or "麦麦",
+                plugin_name="麦麦外汇战士",
+                auto_trade=bool(config.decision.auto_trade),
+                account_yuan=int(config.account.initial_balance),
+                leverage=int(config.account.leverage),
+                pair_count=len(engine.pairs) if engine is not None else None,
+            )
+            result = maisaka_glue.inject_fact(kwargs, block)
+            if result is not None:
+                self._log_debug("已向 Planner 注入外汇插件事实")
+            return result
+        except Exception:  # noqa: BLE001 - 注入失败不能影响宿主请求
+            return None
+
+    def _log_debug(self, message: str) -> None:
+        """安全写日志（上下文未就绪时静默跳过）。"""
+
+        try:
+            self.ctx.logger.debug(message)
+        except Exception:  # noqa: BLE001
+            pass
 
     @Command(
         "外汇",

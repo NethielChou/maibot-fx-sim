@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.nethielchou.mai-fx-sim",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "plugin_type": "game",
   "name": "麦麦外汇战士",
   "description": "让麦麦在群聊里按自己的判断交易一个本地虚拟外汇账户：虚拟人民币计价、默认 10 倍杠杆、1 万单位、强制平仓、隔夜利息、点差/滑点；真实公开行情；纯娱乐模拟盘，不接真实交易通道、不构成投资建议。",

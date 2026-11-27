@@ -1,5 +1,19 @@
 # 每次改动记录
 
+## [0.4.1] - 2026-11-27
+### Added
+- **让麦麦知道外汇插件存在**（实测：群友问"有没有外汇功能"，麦麦答"暂时没有外汇功能哦"）：
+  - 新增 `maisaka_glue.py`：在 `maisaka.planner.before_request` 与 `maisaka.replyer.before_request`
+    注入「外汇插件事实」（插件名、虚拟账户说明、可用命令、自动交易状态、不得否认功能/不得声称接真实券商）；
+  - 结构必须是 `{item_type:"SystemMessageItem", meta, parts:[{type:"text", text}]}`，返回 `modified_kwargs`，
+    marker 幂等；注入失败静默降级，绝不影响聊天与交易。
+- **播报自称跟随宿主昵称**：状态卡 / 决策卡 / 「…说」等文案改为读取 `bot.nickname`，
+  默认回退「麦麦」；不再写死「麦麦」。
+### Tests
+- **608 个单测全绿**（新增 39：`test_maisaka_glue.py` 23 条 + `test_bot_name.py` 16 条）
+### Notes
+- 版本、id、仓库、author、许可证不变
+
 ## [0.4.0] - 2026-11-27
 ### Changed
 - 插件显示名改为「麦麦外汇战士」

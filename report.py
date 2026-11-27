@@ -102,6 +102,23 @@ ACTION_TEXT = {
     "close_all": "全部平仓",
     "hold": "观望",
 }
+_BOT_NAME = "麦麦"
+
+
+def set_bot_name(name: str) -> None:
+    """设置播报里对机器人本人的称呼（默认「麦麦」；由 plugin 从宿主 bot.nickname 注入）。"""
+
+    global _BOT_NAME
+    text = str(name or "").strip()
+    _BOT_NAME = text or "麦麦"
+
+
+def bot_name() -> str:
+    """当前机器人称呼（默认「麦麦」）。"""
+
+    return _BOT_NAME
+
+
 ACTION_EMOJI = {
     "open_long": "🟢",
     "open_short": "🔴",
@@ -991,7 +1008,7 @@ def status(
     quotes = quotes or {}
     equity, margin, floating = _account_metrics(account, positions, quotes, pairs, rates, leverage)
     pending_count = len(list(pending or []))
-    lines = _title("📊 麦麦外汇战士 · 账户概览")
+    lines = _title(f"📊 {bot_name()} · 外汇账户概览")
     if rates is None:
         lines.extend(_block("⚠️ 汇率不可用：净值与维持率暂停估值", "（绝不用假汇率，暂不开新仓）"))
         lines.append("")
@@ -1079,7 +1096,7 @@ def event_soon_text(event: Any) -> str:
             "⚠️ 公布前后波动会放大、点差可能变宽",
         )
     )
-    lines.extend(_footer("📝 事件窗内麦麦不新开仓；已有持仓照常按风控处理"))
+    lines.extend(_footer("📝 事件窗内" + bot_name() + "不新开仓；已有持仓照常按风控处理"))
     return append_disclaimer(_render(lines))
 
 
@@ -1238,7 +1255,7 @@ def decision_report(intent: Any) -> str:
     action_text = ACTION_TEXT.get(action, action or "观望")
     reason = str(_attr(intent, "reason", "") or "").strip()
     speech = str(_attr(intent, "speech", "") or "").strip()
-    lines = _title("🤔 麦麦的决定")
+    lines = _title(f"🤔 {bot_name()}的决定")
     if action == "hold":
         lines.extend(_block("⏸ 观望（本轮不交易）"))
     else:
@@ -1264,7 +1281,7 @@ def decision_report(intent: Any) -> str:
         lines.extend(_block(reason))
     if speech:
         lines.append("")
-        lines.extend(_block(f"✨ 麦麦说：{speech}"))
+        lines.extend(_block(f"✨ {bot_name()}说：{speech}"))
     lines.append("")
     lines.append(DISCLAIMER)
     return append_disclaimer(_render(lines))

@@ -8,11 +8,14 @@
 
 ## 当前状态
 
-- 版本：**0.4.0**
+- 版本：**0.4.1**
 - 宿主：MaiBot 1.3.13–1.4.99 / `maibot-plugin-sdk` 2.21.0–2.22.99（已在 1.4.3 / SDK 2.22.1 测试实例验证加载）
 - 插件封面：`docs/cover-fx-square-1024.png`（方形）、`docs/cover-fx-wide.png`（横版介绍图）、`icon.png`（512×512 市场图标）
 - 账户：虚拟 **10 万元**、杠杆 **10 倍**（1–25 可配）、最小 **1,000 货币**
 - 自动交易默认 **关闭**（`[decision] auto_trade=false`）
+- **自称跟随宿主昵称**：状态卡/决策卡里的「麦麦」读取 `bot.nickname`，读不到时回退「麦麦」
+- **麦麦知道插件存在**：通过 `maisaka.planner.before_request` / `replyer.before_request` 注入「外汇插件事实」，
+  避免她回答"暂时没有外汇功能"（`maisaka_glue.py`）
 - **人设 = 宿主「身份与人格」页**：只在加载时读取 `personality.personality` 一段文本，
   插件不定义性格、不做数值化、也没有人设设置项
 

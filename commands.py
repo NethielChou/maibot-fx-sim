@@ -655,7 +655,7 @@ async def _cmd_pause(services: CommandServices) -> str:
 
 async def _cmd_resume(services: CommandServices) -> str:
     await _invoke(services, "resume", required=False)
-    return report.card_notice("▶️ 自动交易已恢复", ["麦麦会按设定间隔继续决策"])
+    return report.card_notice("▶️ 自动交易已恢复", [f"{report.bot_name()}会按设定间隔继续决策"])
 
 
 async def _cmd_reset(services: CommandServices, args: list[str]) -> str:

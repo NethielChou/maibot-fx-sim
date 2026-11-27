@@ -19,12 +19,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_PLUGIN_VERSION = "0.4.0"
+EXPECTED_PLUGIN_VERSION = "0.4.1"
 REQUIRED = [
     "plugin.py", "_manifest.json", "config.py", "config_ui.py", "models.py", "pairs.py",
     "market_clock.py", "quotes.py", "execution_cost.py", "orders.py", "accounting.py",
     "risk.py", "ledger.py", "decision.py", "report.py", "commands.py", "scheduler.py",
-    "influence.py", "econ_calendar.py", "calendar_source.py", "fxconv.py",
+    "influence.py",
+    "maisaka_glue.py", "econ_calendar.py", "calendar_source.py", "fxconv.py",
     "README.md", "CHANGELOG.md", "config.example.toml", "LICENSE", ".gitignore",
 ]
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")

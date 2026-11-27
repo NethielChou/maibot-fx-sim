@@ -74,6 +74,7 @@ class TradingEngine:
         ledger: Any,
         log: Callable[[str], None] | None = None,
         persona: str = "",
+        bot_name: str = "麦麦",
         chat_context_fetcher: Callable[[datetime], Any] | None = None,
         calendar_fetcher: Callable[[int], Any] | None = None,
     ) -> None:
@@ -89,6 +90,7 @@ class TradingEngine:
 
         # 宿主人设：插件 on_load 时读取一次后注入（这里只缓存；不定义、不派生任何性格/风控参数）
         self.persona: str = str(persona or "").strip()
+        self.bot_name: str = str(bot_name or "麦麦").strip() or "麦麦"
         # 财经日历：静态事件表 + 真实数据源（[calendar] source=auto 时联网，失败回退静态）
         self.calendar: econ_calendar_mod.EconomicCalendar = econ_calendar_mod.EconomicCalendar.from_config(
             config
@@ -906,6 +908,7 @@ class TradingEngine:
                 self.config,
                 budget,
                 persona=self.persona,
+                bot_name=self.bot_name,
                 chat_context_lines=host_chat_lines,
                 calendar_lines=calendar_lines,
             )

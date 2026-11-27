@@ -176,6 +176,7 @@ def build_prompt(
     persona: str = "",
     chat_context_lines: Any = None,
     calendar_lines: Any = None,
+    bot_name: str = "麦麦",
 ) -> str:
     """构造决策 prompt（中文、严格 JSON 输出约定，含账户/持仓/行情/最近成交）。
 
@@ -195,9 +196,12 @@ def build_prompt(
     decision_cfg = getattr(cfg, "decision", cfg)
     codes = list(pairs.keys())
     persona_text = str(persona or "").strip()
-    lines: list[str] = [persona_text or DEFAULT_HEADER]
+    name = str(bot_name or "麦麦").strip() or "麦麦"
+    default_header = f"你是「{name}」，正在用虚拟资金玩一个纯本地模拟的外汇游戏。"
+    identity_line = f"你是{name}，同时在用虚拟账户炒外汇（纯模拟盘，不接真实交易账户）。"
+    lines: list[str] = [persona_text or default_header]
     if persona_text:
-        lines.append(IDENTITY_LINE)
+        lines.append(identity_line)
     lines.extend(
         [
             "账户按虚拟人民币（元）计价、最大 25 倍杠杆、1,000 货币为单位、周五 17:00（纽约时间）后可持仓过周末。",
@@ -570,6 +574,7 @@ async def decide(
     persona: str = "",
     chat_context_lines: Any = None,
     calendar_lines: Any = None,
+    bot_name: str = "麦麦",
 ) -> DecisionIntent:
     """调用 LLM 做一次决策；任何失败都返回 hold（原因码见模块 docstring）。
 
