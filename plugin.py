@@ -431,16 +431,28 @@ class MaiFxSimPlugin(MaiBotPlugin):
         return self._inject_fact(kwargs)
 
     @HookHandler(
+        "maisaka.replyer.before_model_request",
+        name="mai_fx_replyer_model_fact",
+        description="把外汇插件存在的事实注入 replyer 模型请求（items）",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=6000,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def on_replyer_before_model_request(self, **kwargs: Any) -> dict[str, Any] | None:
+        return self._inject_fact(kwargs)
+
+    @HookHandler(
         "maisaka.replyer.before_request",
         name="mai_fx_replyer_fact",
-        description="把外汇插件存在的事实注入 replyer 请求",
+        description="把外汇插件存在的事实追加到 replyer 的 extra_prompt",
         mode=HookMode.BLOCKING,
         order=HookOrder.LATE,
         timeout_ms=6000,
         error_policy=ErrorPolicy.SKIP,
     )
     async def on_replyer_before_request(self, **kwargs: Any) -> dict[str, Any] | None:
-        return self._inject_fact(kwargs)
+        return self._inject_fact_prompt(kwargs)
 
     def _inject_fact(self, kwargs: Any) -> dict[str, Any] | None:
         """构造事实文本并注入；任何异常都静默降级（绝不影响聊天/交易）。"""
@@ -460,6 +472,23 @@ class MaiFxSimPlugin(MaiBotPlugin):
             if result is not None:
                 self._log_debug("已向 Planner 注入外汇插件事实")
             return result
+        except Exception:  # noqa: BLE001 - 注入失败不能影响宿主请求
+            return None
+
+    def _inject_fact_prompt(self, kwargs: Any) -> dict[str, Any] | None:
+        """replyer.before_request 通道：把事实追加到 extra_prompt（失败静默降级）。"""
+
+        try:
+            config = self.config
+            block = maisaka_glue.build_fact_block(
+                bot_name=getattr(self, "_bot_name", "") or "麦麦",
+                plugin_name="麦麦外汇战士",
+                auto_trade=bool(config.decision.auto_trade),
+                account_yuan=int(config.account.initial_balance),
+                leverage=int(config.account.leverage),
+                pair_count=len(self._engine.pairs) if self._engine is not None else None,
+            )
+            return maisaka_glue.inject_extra_prompt(kwargs, block)
         except Exception:  # noqa: BLE001 - 注入失败不能影响宿主请求
             return None
 

@@ -33,6 +33,7 @@ __all__ = [
     "INJECT_MARKER",
     "MAX_BLOCK_CHARS",
     "build_fact_block",
+    "inject_extra_prompt",
     "inject_fact",
     "has_marker",
 ]
@@ -145,4 +146,35 @@ def inject_fact(
     parts.append({"type": "text", "text": block})
     modified = dict(kwargs)
     modified["items"] = patched
+    return {"action": "continue", "modified_kwargs": modified}
+
+
+def inject_extra_prompt(
+    kwargs: Any,
+    block: str,
+    *,
+    marker: str = INJECT_MARKER,
+) -> dict[str, Any] | None:
+    """把 ``block`` 追加进 ``kwargs['extra_prompt']``（replyer.before_request 用）。
+
+    为什么需要单独一条
+    ------------------
+    ``maisaka.replyer.before_request`` 的载荷**没有** ``items``，只有 ``extra_prompt``
+    （追加到本次回复的额外要求）；而最终回复文本由 replyer 生成，所以只注入 Planner
+    不足以保证她"知道插件存在"。这里按该 Hook 的契约写 extra_prompt。
+
+    返回 ``{"action": "continue", "modified_kwargs": ...}``；无法注入时返回 ``None``。
+    """
+
+    if not block or marker not in block:
+        return None
+    if not isinstance(kwargs, dict):
+        return None
+    current = kwargs.get("extra_prompt")
+    text = str(current or "")
+    if marker in text:
+        return None
+    merged = block if not text.strip() else f"{text.rstrip()}\n\n{block}"
+    modified = dict(kwargs)
+    modified["extra_prompt"] = merged
     return {"action": "continue", "modified_kwargs": modified}

@@ -7,6 +7,9 @@
     注入「外汇插件事实」（插件名、虚拟账户说明、可用命令、自动交易状态、不得否认功能/不得声称接真实券商）；
   - 结构必须是 `{item_type:"SystemMessageItem", meta, parts:[{type:"text", text}]}`，返回 `modified_kwargs`，
     marker 幂等；注入失败静默降级，绝不影响聊天与交易。
+  - **关键坑（已修）**：`maisaka.replyer.before_request` 的载荷**没有** `items`，只有 `extra_prompt`；
+    只注入 Planner 时最终回复仍会否认功能（实测回复由 replyer 生成）。现同时注册
+    `maisaka.replyer.before_model_request`（items）与 `maisaka.replyer.before_request`（extra_prompt）。
 - **播报自称跟随宿主昵称**：状态卡 / 决策卡 / 「…说」等文案改为读取 `bot.nickname`，
   默认回退「麦麦」；不再写死「麦麦」。
 ### Tests

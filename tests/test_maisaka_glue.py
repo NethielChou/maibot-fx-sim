@@ -159,8 +159,51 @@ class InjectFactTestCase(unittest.TestCase):
         self.assertFalse(glue.has_marker([{"item_type": "X", "parts": [{"type": "image"}]}]))
 
 
+class InjectExtraPromptTestCase(unittest.TestCase):
+    """replyer.before_request 通道：载荷没有 items，只有 extra_prompt。"""
+
+    def test_appends_to_empty_extra_prompt(self) -> None:
+        block = glue.build_fact_block()
+        result = glue.inject_extra_prompt({"extra_prompt": "", "session_id": "s1"}, block)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["action"], "continue")
+        self.assertIn(glue.INJECT_MARKER, result["modified_kwargs"]["extra_prompt"])
+        self.assertEqual(result["modified_kwargs"]["session_id"], "s1")
+
+    def test_appends_to_existing_extra_prompt(self) -> None:
+        block = glue.build_fact_block()
+        result = glue.inject_extra_prompt({"extra_prompt": "原有要求"}, block)
+        self.assertIsNotNone(result)
+        merged = result["modified_kwargs"]["extra_prompt"]
+        self.assertTrue(merged.startswith("原有要求"))
+        self.assertIn(glue.INJECT_MARKER, merged)
+
+    def test_missing_extra_prompt_is_filled(self) -> None:
+        block = glue.build_fact_block()
+        result = glue.inject_extra_prompt({}, block)
+        self.assertIsNotNone(result)
+        self.assertIn(glue.INJECT_MARKER, result["modified_kwargs"]["extra_prompt"])
+
+    def test_idempotent(self) -> None:
+        block = glue.build_fact_block()
+        first = glue.inject_extra_prompt({"extra_prompt": ""}, block)
+        self.assertIsNotNone(first)
+        self.assertIsNone(glue.inject_extra_prompt(first["modified_kwargs"], block))
+
+    def test_does_not_mutate_input(self) -> None:
+        block = glue.build_fact_block()
+        kwargs = {"extra_prompt": "原"}
+        glue.inject_extra_prompt(kwargs, block)
+        self.assertEqual(kwargs["extra_prompt"], "原")
+
+    def test_rejects_empty_block(self) -> None:
+        self.assertIsNone(glue.inject_extra_prompt({"extra_prompt": ""}, ""))
+        self.assertIsNone(glue.inject_extra_prompt({"extra_prompt": ""}, "无标记"))
+        self.assertIsNone(glue.inject_extra_prompt(None, glue.build_fact_block()))
+
+
 class PluginHookRegistrationTestCase(unittest.TestCase):
-    """插件类上必须真实注册两个 Hook（Planner / replyer）。"""
+    """插件类上必须真实注册 Planner / replyer 三处 Hook。"""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -187,8 +230,13 @@ class PluginHookRegistrationTestCase(unittest.TestCase):
             for item in components
             if item.get("type") == "HOOK_HANDLER"
         }
-        self.assertIn("maisaka.planner.before_request", hooks)
-        self.assertIn("maisaka.replyer.before_request", hooks)
+        # 最终回复由 replyer 生成，所以 replyer 两处都要注入
+        for hook_name in (
+            "maisaka.planner.before_request",
+            "maisaka.replyer.before_request",
+            "maisaka.replyer.before_model_request",
+        ):
+            self.assertIn(hook_name, hooks, f"缺少 Hook: {hook_name}")
         for metadata in hooks.values():
             self.assertEqual(metadata.get("mode"), "blocking")
             self.assertEqual(metadata.get("error_policy"), "skip")
@@ -198,6 +246,7 @@ class PluginHookRegistrationTestCase(unittest.TestCase):
 
         plugin = self.module.create_plugin()
         self.assertIsNone(plugin._inject_fact({"items": _system_items()}))
+        self.assertIsNone(plugin._inject_fact_prompt({"extra_prompt": ""}))
 
 
 if __name__ == "__main__":
