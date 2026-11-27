@@ -57,6 +57,15 @@ def main() -> int:
                     f"PLUGIN_VERSION 不是 {EXPECTED_PLUGIN_VERSION}：{plugin_version}"
                 )
 
+    # 换行卫生：TOML/py 里出现裸 CR 或双 CR（Windows 文本模式二次翻译）会让宿主 TOML 解析失败，
+    # 典型报错 ``Found invalid character '\r' (at line 1, column 28)``。这里提前拦住。
+    for pattern in ("*.toml", "*.py"):
+        for file in ROOT.glob(pattern):
+            raw = file.read_bytes()
+            if b"\r\r" in raw:
+                errors.append(f"文件含双 CR（换行被二次翻译），会导致宿主解析失败：{file.name}")
+            if raw.replace(b"\r\n", b"").count(b"\r"):
+                errors.append(f"文件含裸 CR（非 CRLF）：{file.name}")
     for file in ROOT.glob("*.py"):
         try:
             py_compile.compile(str(file), doraise=True)
