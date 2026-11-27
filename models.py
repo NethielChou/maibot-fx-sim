@@ -82,6 +82,8 @@ class OrderRequest:
     client_order_id: str = ""
     limit_price: Decimal | None = None
     trigger_price: Decimal | None = None
+    stop_loss: Decimal | None = None   # 开仓计划的保护止损价（成交后转成保护单）
+    take_profit: Decimal | None = None # 开仓计划的保护止盈价（成交后转成保护单）
     time_in_force: str = "GTC"         # GTC / DAY / GTD
     expires_at: datetime | None = None
     position_id: str | None = None     # close 目标持仓（可空 = FIFO）

@@ -150,6 +150,133 @@ def size_by_risk(
     return max(units, 0)
 
 
+def executable_price(req: OrderRequest, quote: QuoteSnapshot | None) -> Decimal | None:
+    """本单**可成交价**估算：买用 ask、卖用 bid；缺一侧时退回限价/触发价/仲值。"""
+
+    if quote is not None and req.side == SIDE_BUY and quote.ask is not None and quote.ask > 0:
+        return _dec(quote.ask)
+    if quote is not None and req.side != SIDE_BUY and quote.bid is not None and quote.bid > 0:
+        return _dec(quote.bid)
+    return _estimate_price(req, quote)
+
+
+def planned_stop_risk(
+    spec: PairSpec,
+    units: int,
+    entry_price: Decimal,
+    stop_price: Decimal,
+    rates: FxRates | None,
+) -> Decimal:
+    """计划止损风险（元，未取整）：``|entry − stop| / pip × 1 pip 元值 × units``。"""
+
+    entry = _dec(entry_price)
+    stop = _dec(stop_price)
+    pip = _dec(spec.pip)
+    stop_pips = abs(entry - stop) / pip
+    pip_value = require_rates(rates).pip_value(spec, 1)
+    return stop_pips * pip_value * Decimal(int(units))
+
+
+def validate_protection_plan(
+    spec: PairSpec,
+    side: str,
+    entry_price: Decimal,
+    stop_loss: Decimal | None,
+    take_profit: Decimal | None,
+) -> str:
+    """校验开仓计划里的止损/止盈价方向；返回原因码（``\"\"`` = 通过）。
+
+    - 多单：止损 < 入场价、止盈 > 入场价；空单相反；
+    - 价格必须为正且按 tick 对齐（引擎另有同类校验，这里给决策层一致的原因码）。
+    """
+
+    entry = _dec(entry_price)
+    for price, name in ((stop_loss, "stop_loss"), (take_profit, "take_profit")):
+        if price is None:
+            continue
+        value = _dec(price)
+        if value <= 0:
+            return "INVALID_STOP" if name == "stop_loss" else "INVALID_PRICE"
+        if value % spec.tick != 0:
+            return "INVALID_PRICE_TICK"
+        if side == SIDE_BUY:
+            if name == "stop_loss" and value >= entry:
+                return "INVALID_STOP"
+            if name == "take_profit" and value <= entry:
+                return "INVALID_TAKE_PROFIT"
+        else:
+            if name == "stop_loss" and value <= entry:
+                return "INVALID_STOP"
+            if name == "take_profit" and value >= entry:
+                return "INVALID_TAKE_PROFIT"
+    return ""
+
+
+def validate_protection_prices(
+    req: OrderRequest,
+    spec: PairSpec,
+    entry_price: Decimal | None,
+) -> str:
+    """校验开仓请求的止损止盈（缺少入场价时只判正数/对齐）。"""
+
+    if req.position_type != POS_OPEN:
+        return ""
+    if entry_price is None:
+        return "QUOTE_MISSING"
+    return validate_protection_plan(
+        spec, req.side, _dec(entry_price), req.stop_loss, req.take_profit
+    )
+
+
+def check_stop_risk(
+    req: OrderRequest,
+    spec: PairSpec,
+    account: AccountState,
+    quote: QuoteSnapshot | None,
+    rates: FxRates | None,
+    cfg,
+) -> tuple[bool, str]:
+    """提交/成交前的止损预算复核：计划风险 > 账户余额 × ``risk_per_trade_ratio`` → 拒绝。
+
+    返回 ``(ok, reason)``；缺止损时**不拦**（是否强制止损由上层入口决定）。
+    """
+
+    if req.position_type != POS_OPEN or req.stop_loss is None:
+        return True, ""
+    entry = executable_price(req, quote)
+    if entry is None or entry <= 0:
+        return False, "QUOTE_MISSING"
+    reason = validate_protection_prices(req, spec, entry)
+    if reason:
+        return False, reason
+    try:
+        planned = planned_stop_risk(spec, int(req.units), entry, req.stop_loss, rates)
+    except (RateUnavailable, ValueError):
+        return False, RATE_UNAVAILABLE
+    ratio = _dec(cfg.risk.risk_per_trade_ratio)
+    budget = _dec(account.balance) * ratio
+    if budget <= 0 or planned > budget:
+        return False, "RISK_EXCEEDS_LIMIT"
+    return True, ""
+
+
+def size_for_planned_stop(
+    account: AccountState,
+    spec: PairSpec,
+    entry_price: Decimal | None,
+    stop_price: Decimal | None,
+    rates: FxRates | None,
+    cfg,
+) -> int:
+    """按计划止损计算**允许的手数**（1,000 整数倍；0=无法定量）。
+
+    与 :func:`size_by_risk` 相同口径，但额外封顶到 ``cfg.risk.max_units_per_pair`` 与
+    ``spec.max_units``；生产开仓入口用它把超预算意图缩量。
+    """
+
+    return size_by_risk(account, spec, entry_price, stop_price, rates, cfg)
+
+
 # ---------------------------------------------------------------------------
 # 日亏 / 回撤
 # ---------------------------------------------------------------------------

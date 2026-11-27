@@ -269,18 +269,16 @@ class HandleTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertIn("已提交买入委托", result)
         self.assertIn("🛡 保护单", result)
-        self.assertEqual(len(calls), 2, calls)
+        self.assertEqual(len(calls), 1, calls)
         entry = calls[0]
         self.assertEqual(entry["pair_text"], "美元日元")
         self.assertEqual(entry["side"], "buy")
         self.assertEqual(entry["units"], 10_000)
         self.assertEqual(entry["order_type"], "limit")
         self.assertEqual(entry["price"], Decimal("158.5"))
-        protect = calls[1]
-        self.assertEqual(protect["position_type"], "close")
-        self.assertEqual(protect["order_type"], "stop")
-        self.assertEqual(protect["price"], Decimal("158.0"))
-        self.assertEqual(protect["side"], "sell")
+        # P0-5：止损/止盈随开仓请求一起提交，父单成交后按真实持仓建保护单（不再预先挂腿）
+        self.assertEqual(entry["stop_loss"], Decimal("158.0"))
+        self.assertIsNone(entry["take_profit"])
 
     async def test_sell_market_order(self) -> None:
         calls: list = []

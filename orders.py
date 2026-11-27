@@ -43,6 +43,7 @@ S5 新規限价                       （open + limit）
 
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
@@ -60,6 +61,7 @@ from models import (
     POS_CLOSE,
     POS_OPEN,
     SIDE_BUY,
+    SIDE_SELL,
     STATUS_CANCELLED,
     STATUS_CREATED,
     STATUS_EXPIRED,
@@ -75,6 +77,12 @@ from models import (
     Position,
     QuoteSnapshot,
 )
+
+#: ``process_tick`` 的阶段：``risk``=先处理风险单（平仓/止损/维持率），``open``=再处理新开仓。
+STAGE_ALL = "all"
+STAGE_RISK = "risk"
+STAGE_OPEN = "open"
+STAGES = (STAGE_ALL, STAGE_RISK, STAGE_OPEN)
 
 # 默认滑点（pips，fixed 模式；规格 §4.4 / margin-swap §5.1）。
 # 测试与集成可注入自定义 slippage_fn（签名 (order_type, spec) -> Decimal）。
@@ -132,11 +140,20 @@ def _quote_age_seconds(quote: QuoteSnapshot, now: datetime) -> float:
 
 
 class _SimState:
-    """本 tick 的模拟账务状态（仅供 S3 维持率重算，不回写调用方的 account/positions）。"""
+    """本 tick 的模拟账务状态（S3 维持率 + 逐笔成交后的风控复核都用它）。
+
+    - ``account`` 是传入账户的**浅拷贝**：每笔成交模拟更新余额/已实现/手续费/当日笔数；
+    - ``positions`` 是持仓的浅拷贝列表：新规成交追加、平仓成交减仓；
+    - 真实 ``account`` / ``positions`` 只在 ``apply_fill`` 时被调用方显式读取，不会被这里改写。
+    """
 
     def __init__(self, account: AccountState, positions: Sequence[Position]) -> None:
-        self.balance: int = int(account.balance)
+        self.account: AccountState = copy.copy(account)
         self.positions: list[Position] = [replace(p) for p in positions]
+
+    @property
+    def balance(self) -> int:
+        return int(self.account.balance)
 
     def find(self, position_id: str) -> Position | None:
         for pos in self.positions:
@@ -145,9 +162,14 @@ class _SimState:
         return None
 
     def apply_fill(self, fill: Fill, spec: PairSpec, leverage: int, rates: FxRates | None) -> None:
-        """应用一笔成交到模拟状态：改余额、建/减持仓。"""
-        self.balance += int(fill.realized_pnl) - int(fill.fee)
+        """应用一笔成交到模拟状态：改余额/已实现/费用/当日笔数，建/减持仓。"""
+        pnl = int(fill.realized_pnl)
+        fee = int(fill.fee)
+        self.account.balance += pnl - fee
+        self.account.realized_pnl += pnl
+        self.account.fees_paid += fee
         if fill.position_type == POS_OPEN:
+            self.account.trades_today = int(self.account.trades_today) + 1
             self.positions.append(
                 Position(
                     position_id=fill.position_id or f"POS-{fill.order_id}",
@@ -189,6 +211,7 @@ class OrderEngine:
         *,
         slippage_fn: Callable[[str, PairSpec], Decimal] | None = None,
         usable_fn: Callable[[PairSpec, QuoteSnapshot | None, datetime, object], tuple[bool, str]] | None = None,
+        open_block_fn: Callable[[datetime], str] | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("INVALID_PAIRS: pairs must not be empty")
@@ -196,6 +219,8 @@ class OrderEngine:
         self.cfg = cfg
         self._slippage_fn = slippage_fn or default_slippage_pips
         self._usable_fn = usable_fn
+        #: 开仓事件窗拦截回调（返回原因码；空串=放行）；由 scheduler 注入财经日历判定。
+        self._open_block_fn = open_block_fn
 
         self._orders: dict[str, Order] = {}
         self._pending: dict[str, Order] = {}
@@ -206,6 +231,9 @@ class OrderEngine:
         self._last_quote_seq: dict[str, int] = {}
         self._order_seq: int = 1
         self._tick_seq: int = 0
+        #: 同一行情快照/同一时刻被拆成 risk→open 两次 process_tick 时复用行情分类，
+        #: 避免第二次被判成「重复快照」而整轮不处理。
+        self._tick_cache: tuple[Mapping[str, QuoteSnapshot], datetime, dict[str, dict]] | None = None
 
         # 审计事件（append-only）：(order_id, event_type, detail)，供 scheduler 写 order_events
         self.events: list[tuple[str, str, str]] = []
@@ -366,6 +394,7 @@ class OrderEngine:
         - `created` 视为 `pending`（P0 无 IFD 子单；恢复时统一参与撮合）
         - 重建 `client_order_id` 幂等映射、OCO 分组、平仓取置（按 `position_id`）
         """
+        self._tick_cache = None
         for order in orders or []:
             self._orders[order.order_id] = order
             self._bump_order_seq(order.order_id)
@@ -392,59 +421,92 @@ class OrderEngine:
         account: AccountState,
         positions: Sequence[Position],
         rates: FxRates | None,
+        *,
+        stage: str = STAGE_ALL,
     ) -> FillResult:
         """处理一个行情 tick（只读 account/positions，返回 FillResult）。
 
-        S1 平仓止损/追踪止损 → S2 平仓限价 → S3 维持率重算（<50% 取消新规挂单、
-        跳过 S4/S5，`last_loss_cut_triggered=True`）→ S4 新规止损 → S5 新规限价；
-        市价单在 S1 之前撮合。同一阶段按 `order_id` 升序，完全确定性。
+        阶段（``stage``）：
+
+        - ``risk``：先跑 S1 平仓止损 / 平仓市价 / S2 平仓限价，再重算维持率；跌破线则
+          取消本 tick 剩余新规挂单并返回（``last_loss_cut_triggered=True``）。调度层在
+          这一阶段之后执行实际强平，**再**调用 ``open`` 阶段——保证新开仓排在盘中强平之后。
+        - ``open``：市价新规 → S4 新规止损 → S5 新规限价；每笔成交前用「上一笔成交后的
+          账户、持仓与最新报价」逐笔重验保证金/持仓数/单位上限/日笔数/风险停手/事件窗。
+        - ``all``（默认，单测/离线复用）：一次跑完两个阶段，行为与旧版一致。
+
+        同一 ``(quotes, now)`` 被拆成两次调用时复用行情分类，第二次不会被误判为重复快照。
+        同一阶段内按 ``order_id`` 升序，完全确定性。
         """
+        if stage not in STAGES:
+            raise ValueError(f"INVALID_STAGE: {stage!r}")
         quotes = dict(quotes or {})
         positions = list(positions or [])
         result = FillResult()
         self._tick_seq += 1
         self.last_loss_cut_triggered = False
 
-        # 0) 到期（仅显式 expires_at；DAY 日切由 scheduler 负责）
-        self._expire_due(now)
+        if stage in (STAGE_ALL, STAGE_RISK):
+            self._expire_due(now)
 
-        # 1) 行情质量（每 pair 每 tick 只算一次；含乱序/重复快照守卫）
+        # 1) 行情质量（每 pair 每 tick 只算一次；含乱序/重复/时间戳守卫）
         pairs_in_play: set[str] = {o.request.pair for o in self._pending.values()}
         pairs_in_play.update(p.pair for p in positions)
-        quality: dict[str, dict] = {}
-        for pair in pairs_in_play:
-            quality[pair] = self._classify(pair, quotes.get(pair), now)
+        quality = self._quality_for_tick(quotes, now, pairs_in_play)
 
-        # 2) 本 tick 模拟状态（仅用于 S3 维持率重算）
+        # 2) 本 tick 模拟状态（逐笔成交风控复核 + S3 维持率重算）
         sim = _SimState(account, positions)
         leverage = int(self.cfg.account.leverage)
 
-        # 3) 市价（提交后首 tick 立即撮合）
-        for order in self._candidates((ORDER_MARKET,), None):
+        if stage in (STAGE_ALL, STAGE_RISK):
+            # 3) 市价平仓单（减少敞口，最先处理）
+            for order in self._candidates((ORDER_MARKET,), POS_CLOSE):
+                self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
+            # 4) S1 平仓止损 / 追踪止损
+            for order in self._candidates((ORDER_STOP, ORDER_TRAILING), POS_CLOSE):
+                self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
+            # 5) S2 平仓限价
+            for order in self._candidates((ORDER_LIMIT,), POS_CLOSE):
+                self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
+            # 6) S3 维持率重算（S1/S2 成交后；仍 < loss_cut_ratio 则取消剩余新规挂单）
+            if sim.positions and self._loss_cut_breached(sim, quotes, rates):
+                self.last_loss_cut_triggered = True
+                self._cancel_new_orders("RISK_CANCELLED", now)
+                return result
+            if stage == STAGE_RISK:
+                return result
+
+        # 7) 市价开仓单（排在盘中强平之后）
+        for order in self._candidates((ORDER_MARKET,), POS_OPEN):
             self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
-
-        # 4) S1 平仓止损 / 追踪止损
-        for order in self._candidates((ORDER_STOP, ORDER_TRAILING), POS_CLOSE):
-            self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
-
-        # 5) S2 平仓限价
-        for order in self._candidates((ORDER_LIMIT,), POS_CLOSE):
-            self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
-
-        # 6) S3 维持率重算（S1/S2 成交后；仍 < loss_cut_ratio 则取消剩余新规挂单）
-        if sim.positions and self._loss_cut_breached(sim, quotes, rates):
-            self.last_loss_cut_triggered = True
-            self._cancel_new_orders("RISK_CANCELLED", now)
-            return result
-
-        # 7) S4 新規止损
+        # 8) S4 新規止损
         for order in self._candidates((ORDER_STOP, ORDER_TRAILING), POS_OPEN):
             self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
-
-        # 8) S5 新規限价
+        # 9) S5 新規限价
         for order in self._candidates((ORDER_LIMIT,), POS_OPEN):
             self._process_order(order, quotes, quality, now, account, positions, rates, sim, result, leverage)
         return result
+
+    # ------------------------------------------------------------------
+    # 内部：行情分类缓存
+    # ------------------------------------------------------------------
+    def _quality_for_tick(
+        self,
+        quotes: Mapping[str, QuoteSnapshot],
+        now: datetime,
+        pairs_in_play: set[str],
+    ) -> dict[str, dict]:
+        """同一 ``(quotes, now)`` 复用行情分类；新出现的 pair 再补算。"""
+
+        if self._tick_cache is not None:
+            cached_quotes, cached_now, cached = self._tick_cache
+            if cached_now == now and cached_quotes == quotes:
+                for pair in pairs_in_play - set(cached):
+                    cached[pair] = self._classify(pair, quotes.get(pair), now)
+                return cached
+        quality = {pair: self._classify(pair, quotes.get(pair), now) for pair in pairs_in_play}
+        self._tick_cache = (quotes, now, quality)
+        return quality
 
     # ------------------------------------------------------------------
     # 内部：校验
@@ -515,6 +577,19 @@ class OrderEngine:
         # 汇率锚：账户币种是元，缺 USDCNY/USDJPY 时一律拒绝开仓（不得用假汇率）
         if rates is None:
             return RATE_UNAVAILABLE
+
+        # 开仓计划校验：事件窗 / 止损止盈方向 / 计划风险预算（超 2% 拒单）
+        if req.position_type == POS_OPEN:
+            block = self._open_block_reason(now)
+            if block:
+                return block
+            entry_est = risk.executable_price(req, quote)
+            reason = risk.validate_protection_prices(req, spec, entry_est)
+            if reason:
+                return reason
+            ok, reason = risk.check_stop_risk(req, spec, account, quote, rates, self.cfg)
+            if not ok:
+                return reason
 
         # 价格偏离保护（防手滑/错误单位）：限价/止损距 mid 超过 20%
         mid = quote.mid if quote.mid is not None else (quote.bid + quote.ask) / Decimal(2)
@@ -668,6 +743,10 @@ class OrderEngine:
         info = quality.get(req.pair) or self._classify(req.pair, quote, now)
         if info.get("duplicate"):
             return  # 乱序/重复快照：丢弃本 tick
+        if rates is None:
+            # 缺换算锚：不撮合任何订单（平仓也需要元损益），挂起等锚恢复。
+            self._suspend_order(order, RATE_UNAVAILABLE, result)
+            return
         if quote is None or quote.bid is None or quote.ask is None:
             if req.order_type == ORDER_MARKET:
                 self._reject_order(order, info.get("reason") or "QUOTE_MISSING", now, result)
@@ -727,6 +806,16 @@ class OrderEngine:
                 return
         else:  # market
             triggered = True
+
+        # ---- 开仓逐笔风控复核（用上一笔成交后的账户/持仓/价格） ----
+        if req.position_type == POS_OPEN:
+            block = self._fill_open_block_reason(req, spec, quote, quotes, now, sim, rates)
+            if block:
+                if req.order_type == ORDER_MARKET:
+                    self._reject_order(order, block, now, result)
+                else:
+                    self._suspend_order(order, block, result)
+                return
 
         # ---- 平仓目标（可能被同 tick 先前成交消耗） ----
         target_pos: Position | None = None
@@ -830,8 +919,94 @@ class OrderEngine:
             self._cancel_order(sibling, "OCO_CANCELLED", now, result=None)
 
     # ------------------------------------------------------------------
-    # 内部：状态迁移工具
+    # 内部：开仓风控（提交 + 逐笔成交）
     # ------------------------------------------------------------------
+    def _open_block_reason(self, now: datetime) -> str:
+        """事件窗等外部开仓拦截（回调由 scheduler 注入；异常一律放行，不因日历故障停摆）。"""
+
+        if self._open_block_fn is None:
+            return ""
+        try:
+            return str(self._open_block_fn(now) or "")
+        except Exception:  # noqa: BLE001 - 日历/回调故障不影响撮合
+            return ""
+
+    def _fill_open_block_reason(
+        self,
+        req: OrderRequest,
+        spec: PairSpec,
+        quote: QuoteSnapshot,
+        quotes: Mapping[str, QuoteSnapshot],
+        now: datetime,
+        sim: _SimState,
+        rates: FxRates | None,
+    ) -> str:
+        """逐笔成交前的开仓复核：事件窗 / 止损预算 / 账户、持仓、保证金与日笔数。"""
+
+        block = self._open_block_reason(now)
+        if block:
+            return block
+        if rates is None:
+            return RATE_UNAVAILABLE
+        ok, reason = risk.check_stop_risk(req, spec, sim.account, quote, rates, self.cfg)
+        if not ok:
+            return reason
+        equity = self._sim_equity(sim, quotes, rates)
+        ok, reason = risk.check_open(
+            req,
+            spec,
+            sim.account,
+            sim.positions,
+            quotes,
+            rates,
+            self.cfg,
+            now,
+            risk.daily_loss_hit(sim.account, equity, self.cfg),
+            risk.drawdown_hit(sim.account, equity, self.cfg),
+            pairs=self.pairs,
+        )
+        return "" if ok else reason
+
+    def _sim_equity(
+        self,
+        sim: _SimState,
+        quotes: Mapping[str, QuoteSnapshot],
+        rates: FxRates | None,
+    ) -> int:
+        """模拟账户净值；估值失败退化为模拟余额（保守但不崩溃）。"""
+
+        if rates is None:
+            return int(sim.account.balance)
+        try:
+            return accounting.equity(sim.account, sim.positions, quotes, self.pairs, rates)
+        except (KeyError, ValueError):
+            return int(sim.account.balance)
+
+    # ------------------------------------------------------------------
+    # 内部：保护单/关联单取消
+    # ------------------------------------------------------------------
+    def cancel_orders_for_position(
+        self,
+        position_id: str,
+        now: datetime,
+        reason: str = "POSITION_CLOSED",
+    ) -> list[str]:
+        """取消绑定在指定持仓上的全部 pending 平仓单（保护单/手动平仓腿）。
+
+        持仓已经平掉后保护单必须一起撤销，否则 OCO 另一腿会悬空并在之后被当成孤儿单。
+        返回被取消的 order_id 列表。
+        """
+
+        cancelled: list[str] = []
+        for order in list(self._pending.values()):
+            if order.request.position_type != POS_CLOSE:
+                continue
+            if self._close_target.get(order.order_id) != str(position_id):
+                continue
+            self._cancel_order(order, reason, now, result=None)
+            cancelled.append(order.order_id)
+        return cancelled
+
     def _suspend_order(self, order: Order, reason: str, result: FillResult) -> None:
         """挂起订单（粘性，只在首次/原因变化时写事件与返回值）。"""
         reason = reason or "QUOTE_STALE"
@@ -925,10 +1100,15 @@ class OrderEngine:
     def _classify(self, pair: str, quote: QuoteSnapshot | None, now: datetime) -> dict:
         """行情质量分类：`{reason, wide, duplicate}`。
 
-        - `duplicate=True`：乱序/重复快照（quote_ts 不递增）→ 本 tick 该货币对完全不处理
-        - `reason`："" / QUOTE_MISSING / LIQUIDITY_ANOMALY / QUOTE_STALE
-        - `wide=True`：点差超过品种上限（平仓单仍允许成交，新规止损挂起）
+        校验 **源时间、接收时间、价格有效性和顺序**（P0-4）：
+
+        - `duplicate=True`：源时间**倒退**（即使 seq 前进也丢弃），或源时间不变且 seq 未前进；
+        - `reason`："" / QUOTE_MISSING / LIQUIDITY_ANOMALY / QUOTE_STALE / STALE_QUOTE_FILL；
+        - 源时间 ``quote_ts`` 缺失/超过 ``market.stale_quote_seconds`` → ``QUOTE_STALE``；
+          接收时间 ``recv_ts`` 超过 ``orders.quote_stale_fill_seconds`` → ``STALE_QUOTE_FILL``；
+        - `wide=True`：点差超过品种上限（平仓单仍允许成交，新规止损挂起）。
         """
+
         spec = self.pairs.get(pair)
         info = {"reason": "", "wide": False, "duplicate": False}
         if quote is None or quote.bid is None or quote.ask is None:
@@ -938,22 +1118,36 @@ class OrderEngine:
         last_seq = self._last_quote_seq.get(pair)
         quote_ts = quote.quote_ts
         last_ts = self._last_quote_ts.get(pair)
-        # 去重规则：仅当"时间戳不变或倒退"且"seq 未严格前进"时判为重复。
-        # - 真实轮询：seq 单调递增，同一秒内时间戳不变的新快照仍应处理；
-        # - 外部注入/测试：seq 可能恒为 0 或相同，此时退回按行情时间戳去重。
-        if quote_ts is not None and last_ts is not None and quote_ts <= last_ts:
-            if quote_seq <= 0 or (last_seq is not None and quote_seq <= last_seq):
+        if quote_ts is None:
+            info["reason"] = "QUOTE_STALE"
+            return info
+        if last_ts is not None:
+            if quote_ts < last_ts:
+                # 源时间倒退：新序号也不能放行（过期行情不得触发成交/强平）
                 info["duplicate"] = True
                 return info
-        if quote_seq > 0:
-            self._last_quote_seq[pair] = max(quote_seq, last_seq or 0)
-        if quote_ts is not None:
-            self._last_quote_ts[pair] = quote_ts if last_ts is None else max(quote_ts, last_ts)
+            if quote_ts == last_ts and (
+                quote_seq <= 0 or (last_seq is not None and quote_seq <= last_seq)
+            ):
+                info["duplicate"] = True
+                return info
         if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
             info["reason"] = "LIQUIDITY_ANOMALY"
             return info
+        try:
+            source_age = (now - quote_ts).total_seconds()
+        except TypeError:  # naive/aware 混用 → 交给上层按时间非法处理
+            source_age = 0.0
+        stale_source = int(getattr(self.cfg.market, "stale_quote_seconds", 60))
+        if source_age > stale_source:
+            info["reason"] = "QUOTE_STALE"
+            return info
+        if quote_seq > 0:
+            self._last_quote_seq[pair] = max(quote_seq, last_seq or 0)
+        self._last_quote_ts[pair] = quote_ts if last_ts is None else max(quote_ts, last_ts)
         stale_seconds = int(getattr(self.cfg.orders, "quote_stale_fill_seconds", MAX_QUOTE_AGE_FILL_SECONDS_DEFAULT))
         if _quote_age_seconds(quote, now) > stale_seconds:
+            # 兼容既有原因码：接收时间过旧同样归入 QUOTE_STALE（挂起等待下一 tick）
             info["reason"] = "QUOTE_STALE"
             return info
         if spec is not None:

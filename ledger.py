@@ -9,7 +9,8 @@
   「成交 + 持仓 + 订单 + 事件」放进**同一个事务**，供撮合层一次提交。
 - 幂等：``trades.order_id`` UNIQUE（同一订单不会写两条成交）、
   ``orders.client_order_id`` UNIQUE（QQ 侧重复提交返回原单）、
-  ``swaps`` 以 (日切日, 品种, 方向, 数量, 金额, 天数) 去重（重启不重复计息）。
+  ``swaps`` 以 (日切日, 稳定持仓 ID, 天数) 去重——**必须包含持仓 ID**，否则两笔同品种、
+  同方向、同手数的持仓会被错误归并成一条流水（重启不重复计息，且每个持仓各记一笔）。
 - **账本恒等式**（``check_accounting()`` 的核心，符号约定写死如下）：
 
       balance = initial_balance
@@ -23,8 +24,11 @@
 - 空仓持仓不会出现在 ``positions``：部分平仓后 ``units`` 归零即删除（成交记录保留在 trades）。
 - **schema 版本 2（v0.3.0，账户币种改为虚拟元）**：account/positions/trades/swaps/equity
   的金额列改成币种中性名（``balance`` / ``margin`` / ``fee`` / ``amount`` / ``equity``）。
-  启动时若发现旧版（v1，``*_jpy`` 列）库，**先备份旧库文件**
-  （``<库名>.v1.bak-<时间戳>``，同目录），再重建空库开户，**不做金额静默迁移**。
+  启动时若发现旧版（v1，``*_jpy`` 列）库，**先用 SQLite 一致性备份（含 WAL 已提交内容）**
+  备份到同目录 ``<库名>.v1.bak-<时间戳>``，对备份做 ``PRAGMA integrity_check`` 与关键表
+  校验；**校验通过后才**切换出空 v2 库。备份任一步失败都保留原件（含 -wal/-shm）并报错。
+  v2 库打开时若 ``swaps`` 表还没有 ``position_id`` 列，则**原地重建**该表并保留历史流水
+  （旧流水 ``position_id=''``），不需要重开户。
 
 异常均带原因码：``INVALID_UNITS`` / ``INVALID_FILL`` / ``DUPLICATE_TRADE`` /
 ``DUPLICATE_CLIENT_ORDER_ID`` / ``ACCOUNT_NOT_FOUND`` / ``LEDGER_CLOSED`` /
@@ -34,12 +38,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 try:  # 宿主把 plugin.py 当包加载时走相对导入
     from .models import (
@@ -160,13 +165,14 @@ CREATE TABLE IF NOT EXISTS order_events (
 CREATE TABLE IF NOT EXISTS swaps (
     swap_id INTEGER PRIMARY KEY AUTOINCREMENT,
     rollover_date TEXT NOT NULL,
+    position_id TEXT NOT NULL DEFAULT '',
     pair TEXT NOT NULL,
     side TEXT NOT NULL,
     units INTEGER NOT NULL,
     amount INTEGER NOT NULL,
     days INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE (rollover_date, pair, side, units, amount, days)
+    UNIQUE (rollover_date, position_id, days)
 );
 
 CREATE TABLE IF NOT EXISTS equity (
@@ -269,7 +275,43 @@ class Ledger:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._migrate_schema()
         self._conn.commit()
+
+    # ---------- v2 结构原地升级（swaps.position_id） ----------
+
+    def _migrate_schema(self) -> None:
+        """把旧 v2 库的 ``swaps`` 表原地升级到带 ``position_id`` 的结构。
+
+        幂等：列已存在时什么都不做。历史流水保留（``position_id=''``），不重建账户。
+        这样同一日切两笔同品种/同方向/同手数持仓可以各记一笔利息，而旧流水仍可读。
+        """
+
+        conn = self.conn
+        columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(swaps)")}
+        if not columns or "position_id" in columns:
+            return
+        with self._tx() as tx:
+            tx.execute("ALTER TABLE swaps RENAME TO swaps_legacy_v2")
+            tx.execute(
+                "CREATE TABLE swaps ("
+                " swap_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " rollover_date TEXT NOT NULL,"
+                " position_id TEXT NOT NULL DEFAULT '',"
+                " pair TEXT NOT NULL,"
+                " side TEXT NOT NULL,"
+                " units INTEGER NOT NULL,"
+                " amount INTEGER NOT NULL,"
+                " days INTEGER NOT NULL,"
+                " created_at TEXT NOT NULL,"
+                " UNIQUE (rollover_date, position_id, days)"
+                ")"
+            )
+            tx.execute(
+                "INSERT INTO swaps (rollover_date, position_id, pair, side, units, amount, days, created_at)"
+                " SELECT rollover_date, '', pair, side, units, amount, days, created_at FROM swaps_legacy_v2"
+            )
+            tx.execute("DROP TABLE swaps_legacy_v2")
 
     # ---------- 旧库备份（v1 → v2） ----------
 
@@ -314,9 +356,16 @@ class Ledger:
                 conn.close()
 
     def _backup_legacy_database(self) -> Path | None:
-        """旧版库 → 同目录 ``<库名>.v1.bak-<YYYYmmddTHHMMSS>``（含 -wal/-shm）。
+        """旧版库 → 同目录 ``<库名>.v1.bak-<YYYYmmddTHHMMSS>``（SQLite 一致性备份）。
 
-        备份后删除原文件（连同 -wal/-shm），由调用方重建空库；返回备份路径。
+        流程（**先校验备份、再切换**）：
+
+        1. 有非空 ``-wal`` 伴随时用 ``sqlite3.Connection.backup()``（SQLite 一致性备份，
+           会把 WAL 里已提交但未归并的事务一起写进备份）；没有 ``-wal`` 时按字节复制；
+        2. 对备份做 ``PRAGMA integrity_check``，并确认关键表（``account``）与账户行存在；
+        3. 校验通过后才删除原库（含 -wal/-shm），由调用方重建空库；
+        4. 任一步失败都删除半成品备份并抛 ``LEGACY_SCHEMA_BACKUP_FAILED``——原件保持完整。
+
         不是旧库时不做任何事，返回 ``None``。
         """
 
@@ -328,26 +377,74 @@ class Ledger:
         while backup.exists():
             backup = self._path.with_name(f"{self._path.name}.v1.bak-{stamp}-{suffix}")
             suffix += 1
+        wal = self._path.with_name(self._path.name + "-wal")
+        shm = self._path.with_name(self._path.name + "-shm")
         try:
-            self._path.replace(backup)
+            if wal.exists() and wal.stat().st_size > 0:
+                self._backup_with_sqlite(backup)
+            else:
+                shutil.copyfile(self._path, backup)
+            self._verify_backup(backup)
+        except Exception as exc:  # noqa: BLE001 - 备份失败一律保留原件
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+            raise LedgerError(
+                f"LEGACY_SCHEMA_BACKUP_FAILED：旧版库无法一致性备份（{exc}），已停止启动；"
+                "原件与 -wal/-shm 未被修改，请先关闭占用该文件的进程后重试"
+            ) from exc
+        # 备份已校验：删除原件与伴随文件，交给正常打开流程建新库。
+        for side in (wal, shm):
+            try:
+                side.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise LedgerError(
+                    f"LEGACY_SCHEMA_SWITCH_FAILED：备份已完成（{backup.name}），"
+                    f"但无法删除旧库伴随文件 {side.name}（{exc}）；请手动处理后重启"
+                ) from exc
+        try:
+            self._path.unlink()
         except OSError as exc:
             raise LedgerError(
-                f"LEGACY_SCHEMA_BACKUP_FAILED：旧版库无法备份（{exc}），已停止启动；"
-                "请先关闭占用该文件的进程，或手动把库文件改名后再启动"
+                f"LEGACY_SCHEMA_SWITCH_FAILED：备份已完成（{backup.name}），"
+                f"但无法删除旧主库（{exc}）；请手动处理后重启"
             ) from exc
-        for extra in ("-wal", "-shm"):
-            side = self._path.with_name(self._path.name + extra)
-            if side.exists():
-                try:
-                    side.replace(backup.with_name(backup.name + extra))
-                except OSError:
-                    # 旧 WAL/SHM 无法改名时直接删除：它们属于已备份的旧库，
-                    # 留着会被新库误当成自己的日志（宁可丢弃未提交尾巴，也不能冒损坏风险）。
-                    try:
-                        side.unlink()
-                    except OSError:
-                        pass
         return backup
+
+    def _backup_with_sqlite(self, backup_path: Path) -> None:
+        """用 SQLite 在线备份 API 生成一致性副本（含 WAL 已提交事务）。"""
+
+        source = sqlite3.connect(str(self._path), timeout=2.0)
+        target = sqlite3.connect(str(backup_path), timeout=2.0)
+        try:
+            source.backup(target)
+            target.commit()
+        finally:
+            target.close()
+            source.close()
+
+    @staticmethod
+    def _verify_backup(backup_path: Path) -> None:
+        """校验备份可用：``integrity_check`` 通过且关键表/账户行存在。"""
+
+        conn = sqlite3.connect(str(backup_path), timeout=2.0)
+        try:
+            check = conn.execute("PRAGMA integrity_check").fetchall()
+            results = [str(row[0]) for row in check]
+            if results != ["ok"]:
+                raise LedgerError(f"备份 integrity_check 未通过：{results}")
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='account'"
+            ).fetchone()
+            if table is None:
+                raise LedgerError("备份缺少 account 表")
+            if conn.execute("SELECT 1 FROM account LIMIT 1").fetchone() is None:
+                raise LedgerError("备份 account 表没有账户行")
+        finally:
+            conn.close()
 
     # ---------- 生命周期 ----------
 
@@ -851,10 +948,13 @@ class Ledger:
         units: int,
         amount: int,
         days: int,
+        *,
+        position_id: str = "",
     ) -> bool:
         """记一笔日切隔夜利息并同步更新账户余额（正=收取，负=支付）。
 
-        - 同一 (日切日, 品种, 方向, 数量, 金额, 天数) 重复调用**不会重复入账**（返回 False）；
+        - 幂等键 = **(日切日, 稳定持仓 ID, 天数)**；重复调用**不会重复入账**（返回 False）。
+          旧流水没有持仓 ID 时按空串归并：同一天同方向同手数的第一笔仍幂等。
         - 入账后 ``balance += amount``、``swap_paid += amount``，
           与恒等式中的 ``+ Σ swaps.amount`` 一致。
         """
@@ -869,9 +969,19 @@ class Ledger:
             self._ensure_account(conn)
             before = conn.total_changes
             conn.execute(
-                "INSERT OR IGNORE INTO swaps (rollover_date, pair, side, units, amount, days, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(rollover_date), str(pair), str(side), int(units), int(amount), int(days), dt_to_text(utc_now())),
+                "INSERT OR IGNORE INTO swaps"
+                " (rollover_date, position_id, pair, side, units, amount, days, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(rollover_date),
+                    str(position_id or ""),
+                    str(pair),
+                    str(side),
+                    int(units),
+                    int(amount),
+                    int(days),
+                    dt_to_text(utc_now()),
+                ),
             )
             if conn.total_changes == before:  # 幂等命中：不重复改余额
                 return False
@@ -891,6 +1001,7 @@ class Ledger:
         return [
             {
                 "rollover_date": str(row["rollover_date"]),
+                "position_id": str(row["position_id"] or ""),
                 "pair": str(row["pair"]),
                 "side": str(row["side"]),
                 "units": int(row["units"]),
@@ -900,6 +1011,72 @@ class Ledger:
             }
             for row in rows
         ]
+
+    def commit_rollover(
+        self,
+        *,
+        entries: Sequence[tuple[str, str, str, str, int, int, int]],
+        positions: Sequence[Position],
+        account: AccountState,
+        rollover_date: str,
+        meta_key: str = "last_rollover",
+        equity_ts: datetime | None = None,
+        equity: int | None = None,
+    ) -> list[tuple[str, str, str, str, int, int, int]]:
+        """**同一事务**提交一个日切批次：利息流水 + 仓位应计 + 账户 + 批次水位。
+
+        - ``entries``：``(日切日, 持仓 ID, 品种, 方向, 数量, 金额, 天数)`` 列表；
+        - 幂等：``swaps`` 按 (日切日, 持仓 ID, 天数) 去重，命中条目不再改余额/应计；
+        - 只有**实际入账**的条目会累加到传入的 ``positions``（``swap_accrued``）与
+          ``account``（``balance`` / ``swap_paid``）；调用方成功后用这两个对象替换内存状态；
+        - 同事务写入 ``account`` 整行（含日切计数/日初净值）与 ``meta[meta_key]`` 水位，
+          避免「流水进了但水位没进」或反之；可选写一条权益快照；
+        - 返回实际入账的条目（供调度层播报与测试断言）。
+        """
+
+        applied: list[tuple[str, str, str, str, int, int, int]] = []
+        by_id = {str(pos.position_id): pos for pos in positions}
+        with self._tx() as conn:
+            self._ensure_account(conn)
+            for entry in entries:
+                date_text, position_id, pair, side, units, amount, days = entry
+                before = conn.total_changes
+                conn.execute(
+                    "INSERT OR IGNORE INTO swaps"
+                    " (rollover_date, position_id, pair, side, units, amount, days, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(date_text),
+                        str(position_id or ""),
+                        str(pair),
+                        str(side),
+                        int(units),
+                        int(amount),
+                        int(days),
+                        dt_to_text(utc_now()),
+                    ),
+                )
+                if conn.total_changes == before:
+                    continue
+                account.balance += int(amount)
+                account.swap_paid += int(amount)
+                position = by_id.get(str(position_id))
+                if position is not None:
+                    position.swap_accrued += int(amount)
+                applied.append(entry)
+            for position in positions:
+                self._upsert_position_row(conn, position)
+            self._save_account_row(conn, account)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (str(meta_key), str(rollover_date)),
+            )
+            if equity is not None and equity_ts is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO equity (ts, equity) VALUES (?, ?)",
+                    (dt_to_text(equity_ts) or dt_to_text(utc_now()), int(equity)),
+                )
+        return applied
 
     def swaps_total(self) -> int:
         row = self.conn.execute("SELECT COALESCE(SUM(amount), 0) FROM swaps").fetchone()

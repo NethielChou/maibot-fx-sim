@@ -439,6 +439,7 @@ async def _cmd_status(services: CommandServices) -> str:
         leverage=leverage,
         auto_trade=bool(getattr(getattr(cfg, "decision", None), "auto_trade", False)),
         paused=bool(getattr(engine, "paused", False)),
+        calendar_status=str(getattr(engine, "calendar_status", "") or ""),
     )
 
 
@@ -513,6 +514,8 @@ async def _cmd_trade(services: CommandServices, args: list[str], *, side: str) -
     units = parsed["units"]
     side_text = "买入" if side == "buy" else "卖出"
     user_text = ""
+    stop_loss = parsed["stop_loss"]
+    take_profit = parsed["take_profit"]
     called, result = await _invoke(
         services,
         "manual",
@@ -522,6 +525,8 @@ async def _cmd_trade(services: CommandServices, args: list[str], *, side: str) -
         order_type=order_type,
         price=price,
         user=user_text,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
     )
     if not called:
         raise CommandError("UNSUPPORTED_ACTION：当前版本不支持手动下单")
@@ -534,16 +539,15 @@ async def _cmd_trade(services: CommandServices, args: list[str], *, side: str) -
         f"委托　{_price_text(order_type, price)}",
         f"回执　{detail}",
     ]
-    stop_loss = parsed["stop_loss"]
-    take_profit = parsed["take_profit"]
     if stop_loss is not None or take_profit is not None:
-        try:
-            notes = await _attach_protection(services, parsed, side)
-        except Exception as exc:  # noqa: BLE001 - 保护单失败不改变主单结果
-            notes = [f"保护单异常：{type(exc).__name__}: {exc}"]
-        if notes:
-            lines.extend(["", "🛡 保护单"])
-            lines.extend(notes)
+        lines.extend(["", "🛡 保护单"])
+        legs: list[str] = []
+        if stop_loss is not None:
+            legs.append(f"止损 {report.fmt_price(stop_loss)}")
+        if take_profit is not None:
+            legs.append(f"止盈 {report.fmt_price(take_profit)}")
+        lines.append("｜".join(legs) + "：主单成交后按真实持仓 ID 自动挂出（同一 OCO 组）")
+        lines.append("任一腿成交会自动撤销另一腿")
     return report.card_notice(
         f"✅ 已提交{side_text}委托",
         lines,

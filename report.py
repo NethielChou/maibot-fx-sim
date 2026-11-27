@@ -157,6 +157,19 @@ REASON_TEXT = {
     "MAX_POSITIONS": "持仓数已达风控上限",
     "NANPIN_FORBIDDEN": "禁止对浮亏持仓同向加仓（逆势加仓）",
     "RATE_UNAVAILABLE": "汇率不可用（缺 USDCNY 或 USDJPY，已暂停估值/开仓）",
+    "MISSING_STOP_LOSS": "开仓缺少止损价（保护单无法落实）",
+    "INVALID_STOP": "止损价方向/价格不合法",
+    "INVALID_TAKE_PROFIT": "止盈价方向/价格不合法",
+    "RISK_EXCEEDS_LIMIT": "计划止损风险超过单笔上限（2%）",
+    "RISK_SIZING_ZERO": "按止损预算算出的可开数量为 0",
+    "PRICE_MOVED": "决策后价格变化过大（漂移超限）",
+    "INVALID_TRIGGER_PRICE": "止损单缺少触发价",
+    "INVALID_LIMIT_PRICE": "限价单缺少限价",
+    "STALE_QUOTE_FILL": "快照接收时间过旧（禁止撮合）",
+    "OUT_OF_ORDER": "行情源时间倒退（旧数据）",
+    "QUOTE_GUARD": "行情不完整（缺品种/换算锚）",
+    "POSITION_CLOSED": "持仓已平，关联保护单撤销",
+    "LIQUIDATED": "持仓被强制平仓，关联保护单撤销",
 }
 
 
@@ -966,8 +979,13 @@ def status(
     market_open: bool | None = None,
     auto_trade: bool | None = None,
     paused: bool | None = None,
+    calendar_status: str = "",
 ) -> str:
-    """``/外汇 状态``：账户概览（净值/保证金/盈亏）+ 持仓/挂单/运行状态一屏摘要。"""
+    """``/外汇 状态``：账户概览（净值/保证金/盈亏）+ 持仓/挂单/运行状态一屏摘要。
+
+    ``calendar_status``：财经日历数据源状态（auto/static/失败回退原因），非空时展示一行，
+    方便管理员看到「抓取失败/已回退静态事件表」这类状态。
+    """
 
     positions = list(positions or [])
     quotes = quotes or {}
@@ -1009,6 +1027,8 @@ def status(
     if paused:
         state_bits.append("已暂停")
     lines.extend(_block("🌐 " + "｜".join(state_bits)))
+    if calendar_status:
+        lines.extend(_block(f"📅 财经日历：{calendar_status}"))
     if positions:
         lines.extend(_section("📌 持仓明细"))
         for position in positions:
@@ -1068,13 +1088,18 @@ def event_soon_text(event: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def rate_unavailable_text() -> str:
-    """汇率缺失播报（每个缺失时段只发一次）：不放行新开仓、不估值。"""
+def rate_unavailable_text(missing: Iterable[Any] | None = None) -> str:
+    """汇率缺失播报（每个缺失时段只发一次）：不放行新开仓、不估值。
 
+    ``missing`` 可传缺失的品种/锚代码列表（如 ``["USDCNY"]``），用于明确"缺哪个"。
+    """
+
+    codes = [str(code) for code in (missing or []) if str(code).strip()]
+    subject = "、".join(codes) if codes else "USDCNY / USDJPY"
     lines = _title("⚠️ 汇率不可用")
     lines.extend(
         _block(
-            "缺少 USDCNY / USDJPY 行情",
+            f"缺少 {subject} 行情",
             "无法把盈亏与保证金换算成元",
             "",
             "📌 已暂停估值与开新仓（绝不用假汇率）",
@@ -1082,6 +1107,41 @@ def rate_unavailable_text() -> str:
         )
     )
     lines.extend(_footer("📝 等两条汇率锚都回来再继续，不影响已记录账目"))
+    return append_disclaimer(_render(lines))
+
+
+def quote_guard_text(issues: dict[str, Any] | None = None) -> str:
+    """行情不完整/过期播报：明确缺哪个品种或换算锚，依赖它的交易与强平挂起。"""
+
+    items = dict(issues or {})
+    lines = _title("⚠️ 行情校验未通过")
+    lines.extend(
+        _block(
+            "本轮有行情没有通过新鲜度/顺序校验",
+            "依赖这些行情的成交与强平已挂起（不会用旧价）",
+        )
+    )
+    if items:
+        lines.extend(_section("📋 缺失明细"))
+        for code, reason in sorted(items.items()):
+            lines.extend(_block(f"{code}｜{_reason_text(reason)}"))
+    lines.extend(_footer("📝 新鲜完整的行情回来后会重新评估一次"))
+    return append_disclaimer(_render(lines))
+
+
+def decision_dropped_text(reason: Any) -> str:
+    """旧决策被丢弃播报：暂停/重置/休市/行情过期时，等待期间产生的意图不再执行。"""
+
+    lines = _title("🗑 旧决策已丢弃")
+    lines.extend(
+        _block(
+            f"原因：{_reason_text(reason)}",
+            "模型返回时市场/账户状态已经变化",
+            "",
+            "📌 本轮不下单；下一个决策窗口重新判断",
+        )
+    )
+    lines.extend(_footer("📝 慢模型不会阻塞行情、保护单与强平"))
     return append_disclaimer(_render(lines))
 
 
