@@ -138,6 +138,8 @@ class TradingEngine:
         self._stop = asyncio.Event()
         self._last_quotes_at: datetime | None = None
         self._rate_warned: bool = False
+        #: 告警节流：key -> 上次播报/记录时间（同一类问题在窗口内只报一次）
+        self._warn_at: dict[str, datetime] = {}
         self._last_rollover_date: str = ledger.load_meta("last_rollover") or ""
         self._last_decision_at: datetime | None = None
         self._decision_task: asyncio.Task[None] | None = None
@@ -236,6 +238,20 @@ class TradingEngine:
             return None
         return accounting.maintenance_ratio(equity, margin)
 
+    def _throttled(self, key: str, now: datetime, seconds: float | None = None) -> bool:
+        """同类告警是否已在本窗口内报过（True=应跳过）。
+
+        行情源抖动（例如某交叉盘每分钟才更新、卡在过期阈值边缘）会让「问题集合」
+        每 tick 变化；只按集合去重会变成每 2 秒刷一条。这里改为**按时间节流**。
+        """
+
+        window = float(seconds if seconds is not None else getattr(self.config.notify, "warn_throttle_seconds", 300) or 300)
+        last = self._warn_at.get(key)
+        if last is not None and (now - last).total_seconds() < window:
+            return True
+        self._warn_at[key] = now
+        return False
+
     def _handle_rate_unavailable(self) -> None:
         """汇率缺失：本轮不估值、不撮合、不开仓；同一段缺失只播报并记录一次日志。"""
 
@@ -251,8 +267,10 @@ class TradingEngine:
         )
         if not self._rate_warned:
             self._rate_warned = True
-            self._log(self.last_error)
-            self.emit(report.rate_unavailable_text(missing))
+            now = market_clock.now_utc()
+            if not self._throttled(f"RATE:{detail}", now):
+                self._log(self.last_error)
+                self.emit(report.rate_unavailable_text(missing))
 
     # ---------- 行情校验（源时间 / 接收时间 / 价格 / 顺序） ----------
 
@@ -321,14 +339,21 @@ class TradingEngine:
 
         key = tuple(sorted(self.quote_issues.items()))
         if not key:
+            # 恢复：允许下一次「再次变坏」时立刻播报
             self._quote_guard_key = ()
             self._quote_guard_warned = False
             return
+        self.last_error = "QUOTE_GUARD：" + "、".join(f"{code}（{reason}）" for code, reason in key)
         if key == self._quote_guard_key:
+            # 与上次播报的问题集合完全相同：不再重复
+            return
+        now = market_clock.now_utc()
+        # 同一「问题集合」在窗口内只播一次；集合变了（新问题出现）立刻播报。
+        # 这样行情源在某几个品种上反复抖动（过期/恢复/过期）时不会每 2 秒刷屏。
+        if self._throttled(f"QUOTE_GUARD:{key!r}", now):
             return
         self._quote_guard_key = key
         self._quote_guard_warned = True
-        self.last_error = "QUOTE_GUARD：" + "、".join(f"{code}（{reason}）" for code, reason in key)
         self._log(self.last_error)
         self.emit(report.quote_guard_text(dict(self.quote_issues)))
 
@@ -343,7 +368,8 @@ class TradingEngine:
                 quotes = await self.source.fetch(codes, now, self.seq + 1)
             except Exception as exc:  # noqa: BLE001 - 行情失败：本轮不交易
                 self.last_error = f"行情获取失败：{exc}"
-                self._log(self.last_error)
+                if not self._throttled("QUOTE_FETCH_FAILED", now):
+                    self._log(self.last_error)
                 return
             self.seq += 1
             self.quotes = dict(quotes)

@@ -8,7 +8,7 @@
 
 from maibot_sdk import Field, PluginConfigBase
 
-CONFIG_VERSION = "0.4.1"
+CONFIG_VERSION = "0.4.2"
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -49,7 +49,7 @@ class MarketConfig(PluginConfigBase):
     )
     quote_poll_seconds: int = Field(default=15, ge=5, le=300, description="行情轮询间隔（秒）")
     quote_timeout_seconds: int = Field(default=8, ge=1, le=30, description="单次行情请求超时（秒）")
-    stale_quote_seconds: int = Field(default=60, ge=10, le=600, description="行情时间戳超过该秒数视为过期")
+    stale_quote_seconds: int = Field(default=180, ge=10, le=600, description="行情时间戳超过该秒数视为过期；新浪部分交叉盘约每分钟才更新一次，阈值需大于更新间隔，避免在边界反复抖动")
     quote_jitter_ratio: float = Field(default=0.15, ge=0.0, le=0.5, description="轮询抖动（0.15=±15%，防 WAF）")
     secondary_enabled: bool = Field(default=False, description="备源自动接管；P0 关闭")
     weekend_valuation: bool = Field(default=True, description="周末用最后有效价估值（禁止成交）")
@@ -154,6 +154,18 @@ class NotifyConfig(PluginConfigBase):
     event_reports: bool = Field(default=True, description="是否播报开平仓/强平/利息事件")
     merge_messages: bool = Field(default=True, description="合并转发（防刷屏）")
     merge_window_ms: int = Field(default=800, ge=0, le=5000, description="自动事件合并窗口（毫秒）")
+    warn_throttle_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="同一类异常（行情过期/汇率缺失/抓取失败）的播报与日志节流窗口（秒）；行情源抖动时不刷屏",
+    )
+    stream_retry_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=600,
+        description="播报聊天流解析失败后的重试间隔（秒）；插件已加载但群还没消息时，聊天流可能暂时解析不到",
+    )
 
 
 class AdminConfig(PluginConfigBase):

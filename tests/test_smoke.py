@@ -40,7 +40,7 @@ class PluginContractTest(unittest.TestCase):
 
         self.assertIsInstance(self.plugin, MaiBotPlugin)
         self.assertTrue(callable(self.module.create_plugin))
-        self.assertEqual(self.module.PLUGIN_VERSION, "0.4.1")
+        self.assertEqual(self.module.PLUGIN_VERSION, "0.4.2")
 
     def test_lifecycle_overridden(self):
         from maibot_sdk.plugin import MaiBotPlugin
@@ -52,7 +52,7 @@ class PluginContractTest(unittest.TestCase):
 
     def test_default_config(self):
         config = type(self.plugin).build_default_config()
-        self.assertEqual(config["plugin"]["config_version"], "0.4.1")
+        self.assertEqual(config["plugin"]["config_version"], "0.4.2")
         for section in (
             "plugin", "account", "market", "spread", "orders", "risk",
             "influence", "decision", "swap", "notify", "admin", "calendar", "storage",

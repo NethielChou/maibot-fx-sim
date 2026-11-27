@@ -41,7 +41,7 @@ from .market_clock import now_utc
 from .quotes import QuoteSource
 from .scheduler import TradingEngine
 
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 
 
 class MaiFxSimPlugin(MaiBotPlugin):
@@ -166,6 +166,7 @@ class MaiFxSimPlugin(MaiBotPlugin):
         self._source = None
 
     async def _event_loop(self) -> None:
+        last_stream_retry = 0.0
         try:
             while True:
                 await asyncio.sleep(0.2)
@@ -173,10 +174,33 @@ class MaiFxSimPlugin(MaiBotPlugin):
                     return
                 for text in self._engine.drain_events():
                     await self._send_text(text)
+                # 播报流兜底重试：插件加载时群可能还没消息/流未建立，
+                # 解析为空会导致所有播报被丢弃；这里按间隔重试，成功后不再重试。
+                if not self._allowed_streams:
+                    now_mono = asyncio.get_running_loop().time()
+                    retry = float(getattr(self.config.notify, "stream_retry_seconds", 60) or 60)
+                    if now_mono - last_stream_retry >= retry:
+                        last_stream_retry = now_mono
+                        await self._retry_streams()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             self.ctx.logger.warning("事件发送循环异常：%s", exc)
+
+    async def _retry_streams(self) -> None:
+        """重新解析播报聊天流（失败只记 debug，避免自己刷屏）。"""
+
+        try:
+            await self._refresh_streams()
+        except Exception as exc:  # noqa: BLE001 - 流解析失败不影响交易
+            self.ctx.logger.debug("播报聊天流重试失败：%s", exc)
+            return
+        if self._allowed_streams:
+            self.ctx.logger.info(
+                "播报聊天流已就绪（%d 个）：%s",
+                len(self._allowed_streams),
+                "、".join(sorted(self._allowed_streams)),
+            )
 
     # ---------- 宿主人设 ----------
 
@@ -290,7 +314,9 @@ class MaiFxSimPlugin(MaiBotPlugin):
             return
         targets = [stream_id] if stream_id else sorted(self._allowed_streams)
         if not targets:
-            self.ctx.logger.warning("没有可用播报聊天流：%s", text[:60])
+            # 流未就绪时事件循环会按 stream_retry_seconds 重试解析；
+            # 这里降级为 debug，避免每条播报都刷一条 warning。
+            self.ctx.logger.debug("播报流未就绪，丢弃本条播报：%s", text[:60])
             return
         if not bool(getattr(self.config.notify, "merge_messages", True)):
             await self._send_plain(text, targets)

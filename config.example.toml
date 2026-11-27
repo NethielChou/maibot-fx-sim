@@ -4,7 +4,7 @@
 
 [plugin]
 enabled = true
-config_version = "0.4.1"
+config_version = "0.4.2"
 
 [account]
 # 账户币种固定为虚拟人民币（元），由行情里的 USDCNY/USDJPY 两条真实汇率锚换算
@@ -25,7 +25,7 @@ source = "sina"
 pairs = []
 quote_poll_seconds = 15
 quote_timeout_seconds = 8
-stale_quote_seconds = 60
+stale_quote_seconds = 180
 quote_jitter_ratio = 0.15
 secondary_enabled = false
 weekend_valuation = true
@@ -101,6 +101,8 @@ private_enabled = false
 event_reports = true
 merge_messages = true
 merge_window_ms = 800
+warn_throttle_seconds = 300
+stream_retry_seconds = 60
 
 [admin]
 users = []
