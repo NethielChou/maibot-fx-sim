@@ -4,7 +4,7 @@
 
 [plugin]
 enabled = true
-config_version = "0.4.2"
+config_version = "0.4.3"
 
 [account]
 # 账户币种固定为虚拟人民币（元），由行情里的 USDCNY/USDJPY 两条真实汇率锚换算

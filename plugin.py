@@ -41,7 +41,7 @@ from .market_clock import now_utc
 from .quotes import QuoteSource
 from .scheduler import TradingEngine
 
-PLUGIN_VERSION = "0.4.2"
+PLUGIN_VERSION = "0.4.3"
 
 
 class MaiFxSimPlugin(MaiBotPlugin):

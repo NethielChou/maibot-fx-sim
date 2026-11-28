@@ -73,6 +73,7 @@ class TradingEngine:
         quote_source: Any,
         ledger: Any,
         log: Callable[[str], None] | None = None,
+        log_debug: Callable[[str], None] | None = None,
         persona: str = "",
         bot_name: str = "麦麦",
         chat_context_fetcher: Callable[[datetime], Any] | None = None,
@@ -83,6 +84,8 @@ class TradingEngine:
         self.source = quote_source
         self.ledger = ledger
         self._log = log or (lambda msg: None)
+        #: 休市等「正常但不播报」的诊断日志（默认丢弃，避免刷屏）
+        self._log_debug = log_debug or (lambda msg: None)
 
         self.pairs: dict[str, Any] = pairs_mod.pairs_from_config(getattr(config.market, "pairs", []) or [])
         self.account: AccountState = ledger.load_account()
@@ -238,6 +241,15 @@ class TradingEngine:
             return None
         return accounting.maintenance_ratio(equity, margin)
 
+    @staticmethod
+    def _market_open(now: datetime) -> bool:
+        """当前是否处于可交易时段（周末/收盘后为 False）。"""
+
+        try:
+            return market_clock.market_status(now) == "open"
+        except Exception:  # noqa: BLE001 - 时钟异常时按开市处理（宁可保守告警）
+            return True
+
     def _throttled(self, key: str, now: datetime, seconds: float | None = None) -> bool:
         """同类告警是否已在本窗口内报过（True=应跳过）。
 
@@ -268,6 +280,11 @@ class TradingEngine:
         if not self._rate_warned:
             self._rate_warned = True
             now = market_clock.now_utc()
+            if not self._market_open(now):
+                # 休市时行情停在收盘时点、锚自然缺失，属正常现象：只记 debug，不播报
+                if not self._throttled(f"RATE_CLOSED:{detail}", now):
+                    self._log_debug(f"休市中，汇率缺失不播报：{self.last_error}")
+                return
             if not self._throttled(f"RATE:{detail}", now):
                 self._log(self.last_error)
                 self.emit(report.rate_unavailable_text(missing))
@@ -335,7 +352,11 @@ class TradingEngine:
         return ""
 
     def _warn_quote_issues(self) -> None:
-        """行情不完整/过期时播报一次（同一组问题只播一次，恢复后重置）并挂起依赖项。"""
+        """行情不完整/过期时播报一次（同一组问题只播一次，恢复后重置）并挂起依赖项。
+
+        **休市期间不播报**：周末/收盘后行情源停止更新，价格时间戳会一直"过期"，
+        这时往群里发「行情校验未通过」纯属噪音（用户实测：周末每 5 分钟两条卡片）。
+        """
 
         key = tuple(sorted(self.quote_issues.items()))
         if not key:
@@ -348,6 +369,11 @@ class TradingEngine:
             # 与上次播报的问题集合完全相同：不再重复
             return
         now = market_clock.now_utc()
+        if not self._market_open(now):
+            # 休市：不播报（只按窗口记一条 debug）
+            if not self._throttled("QUOTE_GUARD_CLOSED", now):
+                self._log_debug(f"休市中，行情过期不播报：{self.last_error}")
+            return
         # 同一「问题集合」在窗口内只播一次；集合变了（新问题出现）立刻播报。
         # 这样行情源在某几个品种上反复抖动（过期/恢复/过期）时不会每 2 秒刷屏。
         if self._throttled(f"QUOTE_GUARD:{key!r}", now):
@@ -691,6 +717,10 @@ class TradingEngine:
         - 汇率缺失时本次日切暂不计息（水位不动），等锚恢复后补算。
         """
 
+        if not self._market_open(now):
+            # 休市不做日切：周末不计息，等开市后按结算日历跳过周末补算；
+            # 避免休市期间因汇率锚缺失反复触发「汇率不可用」播报。
+            return
         cur_date = market_clock.current_rollover_date(now)
         if cur_date == self._last_rollover_date:
             return
